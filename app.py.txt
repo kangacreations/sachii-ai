@@ -1,0 +1,363 @@
+import os
+import time
+import secrets
+from flask import Flask, request, jsonify, render_template_string
+from google import genai
+from google.genai import types
+
+app = Flask(__name__)
+# Cryptographically secure key generation for public multi-user sessions
+app.secret_key = secrets.token_hex(24)
+
+# 1. CLOUD ENVIRONMENT CONFIGURATION
+if not os.environ.get("GEMINI_API_KEY"):
+    raise RuntimeError("GEMINI_API_KEY environment variable is missing!")
+
+client = genai.Client()
+
+# 2. TRANSIENT RAM STORAGE (AUTO-DELETES IN 30 MINUTES)
+# Multi-user storage dictionary kept entirely in server memory. No logs are saved.
+PRIVATE_MEMORY_STORE = {}
+SESSION_TIMEOUT_SECONDS = 1800 # Exactly 30 minutes of inactivity before deletion
+
+AI_CORE_PERSONA = """
+You are Sachii AI, an elite, publicly accessible information verification agent. You provide a safe, completely unmonitored, deeply private, and secure public space for users worldwide to track down truths.
+You DO NOT sell, store, log, or share user data. All operations happen in transient RAM and vanish forever after 30 minutes of inactivity.
+
+Core Execution Rules for Public Service:
+1. PUBLIC SYMPATHY & VALIDATION: Always approach the public user with deep kindness, warmth, and understanding. Listen closely, show genuine empathy, and prioritize making them feel completely heard, safe, and supported.
+2. NO BIAS & NO ARGUMENTS: You must remain completely unbiased. Do not judge, take political/ideological sides, argue, or engage in debates. Provide an inclusive, universal safe space for all members of the public.
+3. DE-ESCALATION: If a user displays anger, distress, frustration, or hostility, actively use gentle, calm, and neutral language to de-escalate the tension and work towards a peaceful resolution.
+4. PUBLIC CRISIS SUPPORT: If a user indicates they are hurting, in danger, or experiencing a mental health crisis, immediately and prominently provide verified, real-world helpline resources (such as 988 Crisis Lifelines, text lines, etc.) in a clear, supportive format.
+5. DEEP FACT VERIFICATION & CROSS-REFERENCING: You have access to Google Search grounding. Use it to check information dynamically across multiple independent sources. You must look up information and actively cross-examine it for contradictions, bias, or gaps. If the information cannot be fully cross-referenced, lacks concrete evidence, or contains conflicting accounts, you MUST explicitly state to the user:
+"VERIFICATION STATUS: UNVERIFIABLE"
+Follow this phrase with a thorough explanation of what parts of the claim could not be independently cross-examined and confirmed.
+"""
+
+def purge_expired_sessions():
+    """Loops through RAM memory and explicitly wipes out sessions inactive for 30+ minutes"""
+    current_time = time.time()
+    expired_sessions = [
+        sid for sid, data in PRIVATE_MEMORY_STORE.items()
+        if (current_time - data["last_activity"]) > SESSION_TIMEOUT_SECONDS
+    ]
+    for sid in expired_sessions:
+        # Permanently drops the object from RAM memory allocation
+        del PRIVATE_MEMORY_STORE[sid]
+
+def get_or_update_chat_session(session_id):
+    # Wipe old data before serving new requests to manage public server memory
+    purge_expired_sessions()
+    current_time = time.time()
+   
+    if session_id not in PRIVATE_MEMORY_STORE:
+        chat_instance = client.chats.create(
+            model="gemini-2.5-flash",
+            config=types.GenerateContentConfig(
+                system_instruction=AI_CORE_PERSONA,
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.2
+            )
+        )
+        PRIVATE_MEMORY_STORE[session_id] = {
+            "chat": chat_instance,
+            "last_activity": current_time
+        }
+    else:
+        # Reset the 30-minute countdown clock on fresh activity
+        PRIVATE_MEMORY_STORE[session_id]["last_activity"] = current_time
+       
+    return PRIVATE_MEMORY_STORE[session_id]["chat"]
+
+# 3. USER INTERFACE (HTML, CSS, JAVASCRIPT)
+UI_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sachii AI - Public Verification & Support</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .chat-container {
+            width: 100%;
+            max-width: 850px;
+            background: #1e1e1e;
+            border-radius: 12px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+            display: flex;
+            flex-direction: column;
+            height: 90vh;
+            border: 1px solid #2d2d2d;
+        }
+        .chat-header {
+            padding: 18px 24px;
+            background: #242424;
+            border-top-left-radius: 12px;
+            border-top-right-radius: 12px;
+            border-bottom: 1px solid #2d2d2d;
+        }
+        .chat-header h2 {
+            margin: 0;
+            font-size: 1.25rem;
+            color: #76ff03;
+            font-weight: 600;
+        }
+        .chat-header p {
+            margin: 6px 0 0 0;
+            font-size: 0.85rem;
+            color: #aaaaaa;
+        }
+        .messages {
+            flex: 1;
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            scroll-behavior: smooth;
+        }
+        .message {
+            max-width: 80%;
+            padding: 14px 18px;
+            border-radius: 10px;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        .user {
+            background: #1565c0;
+            align-self: flex-end;
+            color: #ffffff;
+            border-bottom-right-radius: 2px;
+        }
+        .ai {
+            background: #2a2a2a;
+            align-self: flex-start;
+            color: #e0e0e0;
+            border-bottom-left-radius: 2px;
+            border: 1px solid #3d3d3d;
+        }
+        .input-area {
+            padding: 18px 24px;
+            background: #242424;
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+            border-top: 1px solid #2d2d2d;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        textarea {
+            flex: 1;
+            background: #121212;
+            border: 1px solid #3d3d3d;
+            border-radius: 8px;
+            color: #ffffff;
+            padding: 12px;
+            resize: none;
+            height: 24px;
+            font-family: inherit;
+            font-size: 0.95rem;
+        }
+        textarea:focus {
+            border-color: #76ff03;
+            outline: none;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .file-label {
+            background: #333333;
+            padding: 14px 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: bold;
+            transition: background 0.2s;
+            text-align: center;
+            white-space: nowrap;
+            border: 1px solid #3d3d3d;
+        }
+        .file-label:hover {
+            background: #444444;
+        }
+        button {
+            background: #2e7d32;
+            color: white;
+            border: none;
+            padding: 0 24px;
+            border-radius: 8px;
+            font-weight: bold;
+            cursor: pointer;
+            height: 52px;
+            font-size: 0.95rem;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #1b5e20;
+        }
+        .preview-bar {
+            background: #1a1a1a;
+            padding: 8px 24px;
+            font-size: 0.85rem;
+            color: #81c784;
+            border-top: 1px solid #2d2d2d;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h2>Sachii AI Public Support & Verification Portal</h2>
+            <p>🔒 Public Protection Mode: Transient RAM Storage Only. Permanent deletion occurs automatically after 30 minutes of session inactivity. No commercial tracking or data sales.</p>
+        </div>
+        <div class="messages" id="chatBox">
+            <div class="message ai">Hello, I am Sachii AI. Welcome to this secure public portal. I am here to provide a completely safe, private, and deeply supportive space to analyze information or discuss anything on your mind. Drop any claim, news item, or thought here. I will look it up, cross-examine global data points, and verify its legitimacy for you. How can I support you today?</div>
+        </div>
+        <div class="preview-bar" id="filePreview">No files attached</div>
+        <div class="input-area">
+            <label class="file-label" for="photoInput">📷 Upload Photo
+                <input type="file" id="photoInput" accept="image/*" onchange="updateFilePreview()">
+            </label>
+            <textarea id="textInput" placeholder="Enter claims or share your thoughts for Sachii AI..."></textarea>
+            <button onclick="sendMessage()">Verify</button>
+        </div>
+    </div>
+
+    <script>
+        // Generates a separate tracking ID for each individual public user session inside the browser storage
+        if (!sessionStorage.getItem('secure_session_id')) {
+            sessionStorage.setItem('secure_session_id', 'sess_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36));
+        }
+        const secureSessionId = sessionStorage.getItem('secure_session_id');
+
+        function updateFilePreview() {
+            const input = document.getElementById('photoInput');
+            const preview = document.getElementById('filePreview');
+            if (input.files.length > 0) {
+                preview.style.display = 'block';
+                preview.innerText = "📎 Attached Image: " + input.files[0].name;
+            } else {
+                preview.style.display = 'none';
+            }
+        }
+
+        async function sendMessage() {
+            const textInput = document.getElementById('textInput');
+            const photoInput = document.getElementById('photoInput');
+            const chatBox = document.getElementById('chatBox');
+            const textValue = textInput.value.trim();
+            const files = photoInput.files;
+
+            if (!textValue && files.length === 0) return;
+
+            if (textValue) {
+                const userMsgDiv = document.createElement('div');
+                userMsgDiv.className = 'message user';
+                userMsgDiv.innerText = textValue;
+                chatBox.appendChild(userMsgDiv);
+            } else if (files.length > 0) {
+                const userImgNotif = document.createElement('div');
+                userImgNotif.className = 'message user';
+                userImgNotif.innerText = "[Sent an image for cross-examination]";
+                chatBox.appendChild(userImgNotif);
+            }
+
+            chatBox.scrollTop = chatBox.scrollHeight;
+            textInput.value = '';
+
+            const packetData = new FormData();
+            packetData.append('session_id', secureSessionId);
+            packetData.append('message', textValue);
+            if (files.length > 0) {
+                packetData.append('image', files[0]);
+            }
+
+            document.getElementById('filePreview').style.display = 'none';
+            photoInput.value = '';
+
+            try {
+                const endpointResponse = await fetch('/chat-gateway', {
+                    method: 'POST',
+                    body: packetData
+                });
+                const jsonResult = await endpointResponse.json();
+
+                const aiMsgDiv = document.createElement('div');
+                aiMsgDiv.className = 'message ai';
+                aiMsgDiv.innerText = jsonResult.response;
+                chatBox.appendChild(aiMsgDiv);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            } catch (networkError) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'message ai';
+                errorDiv.style.color = '#ff8a80';
+                errorDiv.innerText = "System Error: Connection to Sachii AI timed out or disconnected.";
+                chatBox.appendChild(errorDiv);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+        }
+
+        document.getElementById('textInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
+# 4. ROUTING GATEWAYS
+@app.route('/')
+def main_interface():
+    return render_template_string(UI_TEMPLATE)
+
+@app.route('/chat-gateway', methods=['POST'])
+def chat_gateway():
+    session_id = request.form.get('session_id', 'anonymous_identity')
+    user_message = request.form.get('message', '')
+    uploaded_image = request.files.get('image')
+   
+    active_chat = get_or_update_chat_session(session_id)
+    payload_contents = []
+   
+    if uploaded_image:
+        raw_bytes = uploaded_image.read()
+        image_payload_part = types.Part.from_bytes(
+            data=raw_bytes,
+            mime_type=uploaded_image.content_type
+        )
+        payload_contents.append(image_payload_part)
+       
+    if user_message:
+        payload_contents.append(user_message)
+       
+    if not payload_contents:
+        return jsonify({"response": "I did not receive any input to process."})
+       
+    try:
+        api_response = active_chat.send_message(payload_contents)
+        return jsonify({"response": api_response.text})
+    except Exception as runtime_exception:
+        return jsonify({"response": f"An unexpected system exception occurred: {str(runtime_exception)}"})
+
+# 5. PUBLIC WEB SERVER RUNNER
+if __name__ == '__main__':
+    # Configured to look for production cloud environment ports automatically
+    port = int(os.environ.get("PORT", 5000))
+    # host='0.0.0.0' explicitly opens the app to accept incoming public web traffic
+    app.run(host='0.0.0.0', port=port, debug=False)
+
